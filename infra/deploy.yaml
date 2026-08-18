@@ -1,16 +1,5 @@
-# CloudFormation Git sync stack deployment file.
-#
-# When you set up the sync ("Sync from Git" in the CloudFormation console),
-# point it at this file. It selects the committed template and supplies its
-# parameters. Stack name, repo, branch, region and the deployment IAM role are
-# configured in the console at setup time (not here).
-#
-# Replace the ConnectionArn value below with your CodeConnections connection ARN
-# (any standard region is fine - e.g. your existing us-west-2 connection).
-# Alternatively, delete this file and let Git sync generate one, entering the
-# value in the console.
 template-file-path: infra/infra.yaml
 parameters:
-  ConnectionArn: REPLACE_WITH_YOUR_CODECONNECTIONS_ARN
-tags:
-  project: cfn-extras-resource
+  ConnectionArn: >-
+    arn:aws:codestar-connections:us-west-2:596802271433:connection/751483fe-a96c-41ab-ace8-88202f6c4dc9
+tags: {}
