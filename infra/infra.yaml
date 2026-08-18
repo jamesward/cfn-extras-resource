@@ -2,9 +2,9 @@ Description: 'cfn-extras-resource release infra: public artifact bucket + tag-tr
 AWSTemplateFormatVersion: 2010-09-09
 Parameters:
   ConnectionArn:
-    Type: String
-    Description: ARN of the CodeConnections connection CodeBuild uses to read this GitHub repo.
-    AllowedPattern: ^arn:aws:codeconnections:.+:\d{12}:connection/.+$
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /cfn-extras-resource/connection-arn
+    Description: SSM parameter name holding the CodeConnections ARN CodeBuild uses to read this repo.
 Resources:
   ArtifactBucket:
     Type: AWS::S3::Bucket
@@ -66,6 +66,9 @@ Resources:
             - codeconnections:GetConnectionToken
             - codeconnections:GetConnection
             - codeconnections:UseConnection
+            - codestar-connections:GetConnectionToken
+            - codestar-connections:GetConnection
+            - codestar-connections:UseConnection
             Resource:
               Ref: ConnectionArn
         PolicyName: release

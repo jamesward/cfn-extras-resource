@@ -14,9 +14,11 @@
 ///
 /// This stack is deployed via CloudFormation Git sync from this repo:
 ///   * committed template:        infra/infra.yaml   (regenerate: see below)
-///   * committed deployment file: infra/deploy.yaml  (supplies ConnectionArn)
-/// The CodeConnections ARN is a stack Parameter (ConnectionArn) so it can be
-/// provided at sync-setup time rather than baked into the template.
+///   * committed deployment file: infra/deploy.yaml
+/// The CodeConnections ARN is read from SSM Parameter Store (the ConnectionArn
+/// parameter is of type AWS::SSM::Parameter::Value<String>), so the
+/// account-specific ARN is never committed here - store it once in SSM at
+/// /cfn-extras-resource/connection-arn in the stack's region.
 ///
 /// Regenerate the committed template after editing this file:
 ///   cd infra && pkl project resolve
@@ -44,13 +46,16 @@ fixed cloudFormation: cloudformationTemplate = new {
   Description = "cfn-extras-resource release infra: public artifact bucket + tag-triggered CodeBuild."
 
   Parameters {
-    // Supplied by the Git sync deployment file. A CodeConnections connection
-    // authorized for the GitHub account; CodeBuild uses it to read the source
-    // and register the tag webhook. May live in any standard region.
+    // Resolved from SSM Parameter Store so the connection ARN (account-specific)
+    // is not committed to this public repo. The parameter value is the SSM
+    // parameter NAME; CloudFormation resolves it to the ARN at deploy time.
+    // Store it once per account, in the stack's region:
+    //   aws ssm put-parameter --name /cfn-extras-resource/connection-arn \
+    //     --type String --value <codeconnections/codestar-connections ARN>
     ["ConnectionArn"] = new {
-      Type = "String"
-      Description = "ARN of the CodeConnections connection CodeBuild uses to read this GitHub repo."
-      AllowedPattern = "^arn:aws:codeconnections:.+:\\d{12}:connection/.+$"
+      Type = "AWS::SSM::Parameter::Value<String>"
+      Default = "/cfn-extras-resource/connection-arn"
+      Description = "SSM parameter name holding the CodeConnections ARN CodeBuild uses to read this repo."
     }
   }
 
@@ -131,6 +136,9 @@ fixed cloudFormation: cloudformationTemplate = new {
                   "codeconnections:GetConnectionToken"
                   "codeconnections:GetConnection"
                   "codeconnections:UseConnection"
+                  "codestar-connections:GetConnectionToken"
+                  "codestar-connections:GetConnection"
+                  "codestar-connections:UseConnection"
                 }
                 Resource = cloudformation.Ref("ConnectionArn")
               }
