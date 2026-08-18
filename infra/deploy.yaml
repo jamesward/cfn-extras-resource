@@ -1,14 +1,9 @@
 # CloudFormation Git sync stack deployment file.
 #
-# Git sync reads stack parameters from THIS file, not the console. There are no
-# parameters to set here: the only parameter, ConnectionArn, is resolved from
-# SSM Parameter Store (see infra.pkl) using the template default, so no
-# account-specific ARN is committed to this repo. Store the ARN once, in the
-# stack's region:
-#   aws ssm put-parameter --name /cfn-extras-resource/connection-arn \
-#     --type String --value <your CodeConnections ARN>
-# Stack name, repo, branch, region and the deployment IAM role are configured in
-# the console at setup time.
+# No parameters: the stack resolves its own Git-sync CodeConnections ARN via the
+# connection_lookup custom resource (see infra.pkl), so nothing account-specific
+# is committed. Stack name, repo, branch, region and the deployment IAM role are
+# configured in the console at setup time.
 template-file-path: infra/infra.yaml
 tags:
   project: cfn-extras-resource

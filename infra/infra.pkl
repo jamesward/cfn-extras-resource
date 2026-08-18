@@ -3,26 +3,31 @@
 ///   * a public, versioned S3 bucket that hosts the Lambda deployment package
 ///   * an IAM role + CodeBuild project that, on each new `v*` git tag, builds
 ///     the slim zip and uploads it to the bucket at a single stable key
+///   * a connection_lookup custom resource (backed by the published artifact)
+///     that resolves this stack's Git-sync CodeConnections ARN, which feeds
+///     CodeBuild's GitHub source auth
 ///
 /// The artifact key is stable (`cfn-extras-resource.zip`); each release is a
 /// new S3 object version, and consumers pin a release via `S3ObjectVersion`
 /// (with Lambda self-managed `REFERENCE` code storage). REFERENCE mode lets the
 /// one bucket back Lambdas in any standard region.
 ///
-/// This CodeBuild only *builds the artifact* (CI in the owner's account); it has
-/// nothing to do with how consumers deploy - they just reference the S3 object.
+/// This stack "eats its own dog food": once the first artifact exists, the
+/// CodeConnections ARN is resolved by the published connection_lookup handler
+/// (Fn::GetAtt ConnectionLookup.ConnectionArn) rather than supplied manually.
+/// The connection_lookup Lambda is pinned to a known-good release by its
+/// immutable S3 object version (`artifactObjectVersion`), consumed in REFERENCE
+/// mode, so a future bad release can't break this stack's own connection
+/// wiring; bump it deliberately. If the artifact is ever unavailable,
+/// temporarily point the CodeBuild source auth back at the
+/// /cfn-extras-resource/connection-arn SSM parameter (kept as a fallback).
 ///
-/// This stack is deployed via CloudFormation Git sync from this repo:
+/// Deployed via CloudFormation Git sync from this repo:
 ///   * committed template:        infra/infra.yaml   (regenerate: see below)
-///   * committed deployment file: infra/deploy.yaml
-/// The CodeConnections ARN is read from SSM Parameter Store (the ConnectionArn
-/// parameter is of type AWS::SSM::Parameter::Value<String>), so the
-/// account-specific ARN is never committed here - store it once in SSM at
-/// /cfn-extras-resource/connection-arn in the stack's region.
+///   * committed deployment file: infra/deploy.yaml  (no parameters needed)
 ///
 /// Regenerate the committed template after editing this file:
-///   cd infra && pkl project resolve
-///   pkl eval infra.pkl -f yaml -o infra.yaml
+///   cd infra && pkl project resolve && pkl eval infra.pkl -f yaml -o infra.yaml
 ///
 /// NOTE: the bucket is intentionally public-read, so the account must not block
 /// public bucket policies (S3 Block Public Access: BlockPublicPolicy /
@@ -42,22 +47,16 @@ bucketName: String = read?("prop:bucketName") ?? "cfn-extras-resource"
 /// GitHub "org/repo" hosting this project - the CodeBuild source (baked in).
 githubRepo: String = read?("prop:githubRepo") ?? "jamesward/cfn-extras-resource"
 
+/// The published artifact backing the connection_lookup Lambda. Consumed the
+/// same way end users consume it: Lambda self-managed S3 code storage in
+/// REFERENCE mode, pinned to an immutable S3 object version. Find the version
+/// for a release tag in versions/<tag>.json; bump deliberately to adopt a newer
+/// handler.
+artifactKey: String = "cfn-extras-resource.zip"
+artifactObjectVersion: String = read?("prop:artifactObjectVersion") ?? "gpucdYhAHtURnEC1jLVSotYBtr5h6A56"
+
 fixed cloudFormation: cloudformationTemplate = new {
   Description = "cfn-extras-resource release infra: public artifact bucket + tag-triggered CodeBuild."
-
-  Parameters {
-    // Resolved from SSM Parameter Store so the connection ARN (account-specific)
-    // is not committed to this public repo. The parameter value is the SSM
-    // parameter NAME; CloudFormation resolves it to the ARN at deploy time.
-    // Store it once per account, in the stack's region:
-    //   aws ssm put-parameter --name /cfn-extras-resource/connection-arn \
-    //     --type String --value <codeconnections/codestar-connections ARN>
-    ["ConnectionArn"] = new {
-      Type = "AWS::SSM::Parameter::Value<String>"
-      Default = "/cfn-extras-resource/connection-arn"
-      Description = "SSM parameter name holding the CodeConnections ARN CodeBuild uses to read this repo."
-    }
-  }
 
   Resources {
     ["ArtifactBucket"] = new s3bucket.Bucket {
@@ -79,8 +78,8 @@ fixed cloudFormation: cloudformationTemplate = new {
       PolicyDocument {
         Version = "2012-10-17"
         Statement {
-          // Anonymous read: any account's Lambda can read the zip (REFERENCE or
-          // COPY mode) and anyone can download it directly. GetObject only.
+          // Anonymous read: any account's Lambda can read the zip (REFERENCE
+          // mode) and anyone can download it directly. GetObject only.
           new {
             Sid = "PublicReadArtifacts"
             Effect = "Allow"
@@ -92,6 +91,76 @@ fixed cloudFormation: cloudformationTemplate = new {
             Resource = cloudformation.Sub("${ArtifactBucket.Arn}/*")
           }
         }
+      }
+    }
+
+    // --- Self-resolved CodeConnections ARN (dogfoods the published artifact) ---
+
+    ["ConnectionLookupRole"] = new iamrole.Role {
+      AssumeRolePolicyDocument {
+        Version = "2012-10-17"
+        Statement {
+          new {
+            Effect = "Allow"
+            Principal { Service = "lambda.amazonaws.com" }
+            Action = "sts:AssumeRole"
+          }
+        }
+      }
+      ManagedPolicyArns {
+        "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      }
+      Policies {
+        new {
+          PolicyName = "resolve-connection"
+          PolicyDocument {
+            Version = "2012-10-17"
+            Statement {
+              new {
+                // GetSyncConfiguration has no resource-level permissions, so
+                // this must be "*". Both service namespaces are granted since
+                // the connection/link may carry either ARN prefix.
+                Effect = "Allow"
+                Action {
+                  "codeconnections:GetSyncConfiguration"
+                  "codeconnections:GetRepositoryLink"
+                  "codestar-connections:GetSyncConfiguration"
+                  "codestar-connections:GetRepositoryLink"
+                }
+                Resource = "*"
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Expressed as a raw resource: the cfn package's typed Lambda Code doesn't
+    // yet include S3ObjectStorageMode (the self-managed-storage property).
+    ["ConnectionLookupFunction"] = new cloudformation.Resource {
+      Type = "AWS::Lambda::Function"
+      Properties = new Mapping {
+        ["Runtime"] = "python3.13"
+        ["Handler"] = "cfn_extras.connection_lookup.handler"
+        ["Timeout"] = 60
+        ["Role"] = cloudformation.GetAtt("ConnectionLookupRole", "Arn")
+        // Self-managed S3 code storage (REFERENCE) - the same way end users
+        // consume this artifact. Pinned to an immutable S3 object version.
+        ["Code"] = new Mapping {
+          ["S3Bucket"] = bucketName
+          ["S3Key"] = artifactKey
+          ["S3ObjectVersion"] = artifactObjectVersion
+          ["S3ObjectStorageMode"] = "REFERENCE"
+        }
+      }
+    }
+
+    ["ConnectionLookup"] = new cloudformation.Resource {
+      Type = "AWS::CloudFormation::CustomResource"
+      Properties = new Mapping {
+        ["ServiceToken"] = cloudformation.GetAtt("ConnectionLookupFunction", "Arn")
+        // Resolve the connection backing THIS stack's Git sync.
+        ["StackName"] = cloudformation.Ref("AWS::StackName")
       }
     }
 
@@ -129,7 +198,7 @@ fixed cloudFormation: cloudformationTemplate = new {
                 Resource = cloudformation.Sub("${ArtifactBucket.Arn}/*")
               }
               new {
-                // Lets CodeBuild use the connection as a GitHub source.
+                // Lets CodeBuild use the resolved connection as a GitHub source.
                 Sid = "UseConnection"
                 Effect = "Allow"
                 Action {
@@ -140,7 +209,7 @@ fixed cloudFormation: cloudformationTemplate = new {
                   "codestar-connections:GetConnection"
                   "codestar-connections:UseConnection"
                 }
-                Resource = cloudformation.Ref("ConnectionArn")
+                Resource = cloudformation.GetAtt("ConnectionLookup", "ConnectionArn")
               }
             }
           }
@@ -165,7 +234,7 @@ fixed cloudFormation: cloudformationTemplate = new {
         Location = "https://github.com/\(githubRepo).git"
         Auth {
           Type = "CODECONNECTIONS"
-          Resource = cloudformation.Ref("ConnectionArn")
+          Resource = cloudformation.GetAtt("ConnectionLookup", "ConnectionArn")
         }
         BuildSpec = "buildspec.yml"
       }
@@ -185,6 +254,7 @@ fixed cloudFormation: cloudformationTemplate = new {
   Outputs {
     ["BucketName"] = new { Value = cloudformation.Ref("ArtifactBucket") }
     ["BuildProject"] = new { Value = cloudformation.Ref("BuildProject") }
+    ["ConnectionArn"] = new { Value = cloudformation.GetAtt("ConnectionLookup", "ConnectionArn") }
   }
 }
 

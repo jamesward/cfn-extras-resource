@@ -1,10 +1,5 @@
 Description: 'cfn-extras-resource release infra: public artifact bucket + tag-triggered CodeBuild.'
 AWSTemplateFormatVersion: 2010-09-09
-Parameters:
-  ConnectionArn:
-    Type: AWS::SSM::Parameter::Value<String>
-    Default: /cfn-extras-resource/connection-arn
-    Description: SSM parameter name holding the CodeConnections ARN CodeBuild uses to read this repo.
 Resources:
   ArtifactBucket:
     Type: AWS::S3::Bucket
@@ -33,6 +28,54 @@ Resources:
           - s3:GetObjectVersion
           Resource:
             Fn::Sub: ${ArtifactBucket.Arn}/*
+  ConnectionLookupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - codeconnections:GetSyncConfiguration
+            - codeconnections:GetRepositoryLink
+            - codestar-connections:GetSyncConfiguration
+            - codestar-connections:GetRepositoryLink
+            Resource: '*'
+        PolicyName: resolve-connection
+  ConnectionLookupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: cfn_extras.connection_lookup.handler
+      Timeout: 60
+      Role:
+        Fn::GetAtt:
+        - ConnectionLookupRole
+        - Arn
+      Code:
+        S3Bucket: cfn-extras-resource
+        S3Key: cfn-extras-resource.zip
+        S3ObjectVersion: gpucdYhAHtURnEC1jLVSotYBtr5h6A56
+        S3ObjectStorageMode: REFERENCE
+  ConnectionLookup:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken:
+        Fn::GetAtt:
+        - ConnectionLookupFunction
+        - Arn
+      StackName:
+        Ref: AWS::StackName
   BuildRole:
     Type: AWS::IAM::Role
     Properties:
@@ -70,7 +113,9 @@ Resources:
             - codestar-connections:GetConnection
             - codestar-connections:UseConnection
             Resource:
-              Ref: ConnectionArn
+              Fn::GetAtt:
+              - ConnectionLookup
+              - ConnectionArn
         PolicyName: release
   BuildProject:
     Type: AWS::CodeBuild::Project
@@ -93,7 +138,9 @@ Resources:
       Source:
         Auth:
           Resource:
-            Ref: ConnectionArn
+            Fn::GetAtt:
+            - ConnectionLookup
+            - ConnectionArn
           Type: CODECONNECTIONS
         BuildSpec: buildspec.yml
         Location: https://github.com/jamesward/cfn-extras-resource.git
@@ -112,3 +159,8 @@ Outputs:
   BuildProject:
     Value:
       Ref: BuildProject
+  ConnectionArn:
+    Value:
+      Fn::GetAtt:
+      - ConnectionLookup
+      - ConnectionArn
