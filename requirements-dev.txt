@@ -1,0 +1,5 @@
+-r requirements.txt
+# boto3 is provided by the Lambda runtime in production; installed here only so
+# tests can import the handlers and exercise a current SDK (codeconnections etc).
+boto3
+pytest

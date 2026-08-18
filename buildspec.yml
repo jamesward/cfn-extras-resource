@@ -1,0 +1,35 @@
+version: 0.2
+
+# Runs in the CodeBuild project provisioned by infra/infra.pkl, triggered by the
+# webhook on each pushed v* tag. Builds the slim Lambda zip and uploads it to a
+# single stable key; each release is a new S3 object version that consumers pin
+# via S3ObjectVersion. $BUCKET is injected by the project.
+
+env:
+  variables:
+    KEY: cfn-extras-resource.zip
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.13
+  build:
+    commands:
+      - ./scripts/build_zip.sh
+      # The tag that triggered the build (e.g. refs/tags/v1.2.3 -> v1.2.3);
+      # falls back to a timestamp for manual runs.
+      - TAG="${CODEBUILD_WEBHOOK_HEAD_REF#refs/tags/}"; TAG="${TAG:-manual-$(date +%Y%m%d%H%M%S)}"
+      - |
+        VERSION=$(aws s3api put-object \
+          --bucket "$BUCKET" --key "$KEY" \
+          --body dist/cfn-extras-resource.zip \
+          --query VersionId --output text)
+      # Publish a tag -> version pointer so consumers can look up the
+      # S3ObjectVersion to pin for a given release.
+      - |
+        printf '{"bucket":"%s","key":"%s","s3ObjectVersion":"%s","tag":"%s"}\n' \
+          "$BUCKET" "$KEY" "$VERSION" "$TAG" > pointer.json
+        aws s3api put-object \
+          --bucket "$BUCKET" --key "versions/${TAG}.json" \
+          --body pointer.json --content-type application/json >/dev/null
+      - echo "Published s3://$BUCKET/$KEY  S3ObjectVersion=$VERSION  (tag $TAG)"

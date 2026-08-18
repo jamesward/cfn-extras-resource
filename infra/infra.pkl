@@ -1,0 +1,183 @@
+/// CloudFormation for the cfn-extras-resource release infrastructure:
+///
+///   * a public, versioned S3 bucket that hosts the Lambda deployment package
+///   * an IAM role + CodeBuild project that, on each new `v*` git tag, builds
+///     the slim zip and uploads it to the bucket at a single stable key
+///
+/// The artifact key is stable (`cfn-extras-resource.zip`); each release is a
+/// new S3 object version, and consumers pin a release via `S3ObjectVersion`
+/// (with Lambda self-managed `REFERENCE` code storage). REFERENCE mode lets the
+/// one bucket back Lambdas in any standard region.
+///
+/// This CodeBuild only *builds the artifact* (CI in the owner's account); it has
+/// nothing to do with how consumers deploy - they just reference the S3 object.
+///
+/// This stack is deployed via CloudFormation Git sync from this repo:
+///   * committed template:        infra/infra.yaml   (regenerate: see below)
+///   * committed deployment file: infra/deploy.yaml  (supplies ConnectionArn)
+/// The CodeConnections ARN is a stack Parameter (ConnectionArn) so it can be
+/// provided at sync-setup time rather than baked into the template.
+///
+/// Regenerate the committed template after editing this file:
+///   cd infra && pkl project resolve
+///   pkl eval infra.pkl -f yaml -o infra.yaml
+///
+/// NOTE: the bucket is intentionally public-read, so the account must not block
+/// public bucket policies (S3 Block Public Access: BlockPublicPolicy /
+/// RestrictPublicBuckets off for the account).
+module `cfn-extras-resource`.infra.infra
+
+import "@cfn/template.pkl" as cloudformationTemplate
+import "@cfn/cloudformation.pkl" as cloudformation
+import "@cfn/aws/s3/bucket.pkl" as s3bucket
+import "@cfn/aws/s3/bucketpolicy.pkl" as s3bucketpolicy
+import "@cfn/aws/iam/role.pkl" as iamrole
+import "@cfn/aws/codebuild/project.pkl" as codebuildproject
+
+/// Globally-unique bucket name (baked into the template at generation time).
+bucketName: String = read?("prop:bucketName") ?? "cfn-extras-resource"
+
+/// GitHub "org/repo" hosting this project - the CodeBuild source (baked in).
+githubRepo: String = read?("prop:githubRepo") ?? "jamesward/cfn-extras-resource"
+
+fixed cloudFormation: cloudformationTemplate = new {
+  Description = "cfn-extras-resource release infra: public artifact bucket + tag-triggered CodeBuild."
+
+  Parameters {
+    // Supplied by the Git sync deployment file. A CodeConnections connection
+    // authorized for the GitHub account; CodeBuild uses it to read the source
+    // and register the tag webhook. May live in any standard region.
+    ["ConnectionArn"] = new {
+      Type = "String"
+      Description = "ARN of the CodeConnections connection CodeBuild uses to read this GitHub repo."
+      AllowedPattern = "^arn:aws:codeconnections:.+:\\d{12}:connection/.+$"
+    }
+  }
+
+  Resources {
+    ["ArtifactBucket"] = new s3bucket.Bucket {
+      BucketName = bucketName
+      // Required by Lambda self-managed (REFERENCE) code storage, and lets
+      // consumers pin an immutable S3ObjectVersion for each release.
+      VersioningConfiguration { Status = "Enabled" }
+      // Allow a public bucket policy (not public ACLs).
+      PublicAccessBlockConfiguration {
+        BlockPublicAcls = true
+        IgnorePublicAcls = true
+        BlockPublicPolicy = false
+        RestrictPublicBuckets = false
+      }
+    }
+
+    ["ArtifactBucketPolicy"] = new s3bucketpolicy.BucketPolicy {
+      Bucket = cloudformation.Ref("ArtifactBucket")
+      PolicyDocument {
+        Version = "2012-10-17"
+        Statement {
+          // Anonymous read: any account's Lambda can read the zip (REFERENCE or
+          // COPY mode) and anyone can download it directly. GetObject only.
+          new {
+            Sid = "PublicReadArtifacts"
+            Effect = "Allow"
+            Principal = "*"
+            Action {
+              "s3:GetObject"
+              "s3:GetObjectVersion"
+            }
+            Resource = cloudformation.Sub("${ArtifactBucket.Arn}/*")
+          }
+        }
+      }
+    }
+
+    ["BuildRole"] = new iamrole.Role {
+      AssumeRolePolicyDocument {
+        Version = "2012-10-17"
+        Statement {
+          new {
+            Effect = "Allow"
+            Principal { Service = "codebuild.amazonaws.com" }
+            Action = "sts:AssumeRole"
+          }
+        }
+      }
+      Policies {
+        new {
+          PolicyName = "release"
+          PolicyDocument {
+            Version = "2012-10-17"
+            Statement {
+              new {
+                Sid = "Logs"
+                Effect = "Allow"
+                Action {
+                  "logs:CreateLogGroup"
+                  "logs:CreateLogStream"
+                  "logs:PutLogEvents"
+                }
+                Resource = "*"
+              }
+              new {
+                Sid = "PublishArtifact"
+                Effect = "Allow"
+                Action { "s3:PutObject" }
+                Resource = cloudformation.Sub("${ArtifactBucket.Arn}/*")
+              }
+              new {
+                // Lets CodeBuild use the connection as a GitHub source.
+                Sid = "UseConnection"
+                Effect = "Allow"
+                Action {
+                  "codeconnections:GetConnectionToken"
+                  "codeconnections:GetConnection"
+                  "codeconnections:UseConnection"
+                }
+                Resource = cloudformation.Ref("ConnectionArn")
+              }
+            }
+          }
+        }
+      }
+    }
+
+    ["BuildProject"] = new codebuildproject.Project {
+      Name = "cfn-extras-resource-release"
+      ServiceRole = cloudformation.GetAtt("BuildRole", "Arn")
+      Artifacts { Type = "NO_ARTIFACTS" }
+      Environment {
+        Type = "LINUX_CONTAINER"
+        ComputeType = "BUILD_GENERAL1_SMALL"
+        Image = "aws/codebuild/amazonlinux2-x86_64-standard:5.0"
+        EnvironmentVariables {
+          new { Name = "BUCKET"; Value = cloudformation.Ref("ArtifactBucket") }
+        }
+      }
+      Source {
+        Type = "GITHUB"
+        Location = "https://github.com/\(githubRepo).git"
+        Auth {
+          Type = "CODECONNECTIONS"
+          Resource = cloudformation.Ref("ConnectionArn")
+        }
+        BuildSpec = "buildspec.yml"
+      }
+      // Build on every pushed tag matching v*.
+      Triggers {
+        Webhook = true
+        FilterGroups {
+          new {
+            new Mapping { ["Type"] = "EVENT"; ["Pattern"] = "PUSH" }
+            new Mapping { ["Type"] = "HEAD_REF"; ["Pattern"] = "^refs/tags/v.*" }
+          }
+        }
+      }
+    }
+  }
+
+  Outputs {
+    ["BucketName"] = new { Value = cloudformation.Ref("ArtifactBucket") }
+    ["BuildProject"] = new { Value = cloudformation.Ref("BuildProject") }
+  }
+}
+
+output = cloudFormation.output

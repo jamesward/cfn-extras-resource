@@ -1,0 +1,111 @@
+Description: 'cfn-extras-resource release infra: public artifact bucket + tag-triggered CodeBuild.'
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  ConnectionArn:
+    Type: String
+    Description: ARN of the CodeConnections connection CodeBuild uses to read this GitHub repo.
+    AllowedPattern: ^arn:aws:codeconnections:.+:\d{12}:connection/.+$
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: cfn-extras-resource
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: false
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: false
+      VersioningConfiguration:
+        Status: Enabled
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: ArtifactBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Sid: PublicReadArtifacts
+          Effect: Allow
+          Principal: '*'
+          Action:
+          - s3:GetObject
+          - s3:GetObjectVersion
+          Resource:
+            Fn::Sub: ${ArtifactBucket.Arn}/*
+  BuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Sid: Logs
+            Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: '*'
+          - Sid: PublishArtifact
+            Effect: Allow
+            Action:
+            - s3:PutObject
+            Resource:
+              Fn::Sub: ${ArtifactBucket.Arn}/*
+          - Sid: UseConnection
+            Effect: Allow
+            Action:
+            - codeconnections:GetConnectionToken
+            - codeconnections:GetConnection
+            - codeconnections:UseConnection
+            Resource:
+              Ref: ConnectionArn
+        PolicyName: release
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+        - Name: BUCKET
+          Value:
+            Ref: ArtifactBucket
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        Type: LINUX_CONTAINER
+      Name: cfn-extras-resource-release
+      ServiceRole:
+        Fn::GetAtt:
+        - BuildRole
+        - Arn
+      Source:
+        Auth:
+          Resource:
+            Ref: ConnectionArn
+          Type: CODECONNECTIONS
+        BuildSpec: buildspec.yml
+        Location: https://github.com/jamesward/cfn-extras-resource.git
+        Type: GITHUB
+      Triggers:
+        FilterGroups:
+        - - Type: EVENT
+            Pattern: PUSH
+          - Type: HEAD_REF
+            Pattern: ^refs/tags/v.*
+        Webhook: true
+Outputs:
+  BucketName:
+    Value:
+      Ref: ArtifactBucket
+  BuildProject:
+    Value:
+      Ref: BuildProject

@@ -1,0 +1,5 @@
+# Runtime dependency bundled into the Lambda zip. boto3/botocore are provided
+# by the Lambda Python runtime (and are kept current there) - do NOT pin/bundle
+# them here, or an old bundled copy will shadow the runtime one and break newer
+# services (e.g. codeconnections).
+crhelper==2.0.12
